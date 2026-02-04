@@ -111,6 +111,10 @@ def main(args):
         gaussian_smooth_sigma = int(1000 / 6)
         if args.sig_format == 'np_array':
             treatment_np_tmp_name = f'{args.o}/{args.name}_sig.h5'
+        elif args.sig_format == 'memmap_np':
+            # Use temp HDF5 during processing, then convert to individual .npy files
+            treatment_np_tmp_name = f'{args.temp_dir_name}/{args.name}_sig.h5'
+            memmap_output_dir = f'{args.o}/{args.name}_signal_tracks'
         elif (args.sig_format == 'wig') or (args.sig_format == 'bigwig'):
             treatment_np_tmp_name = f'{args.temp_dir_name}/{args.name}_sig.h5'
 
@@ -211,7 +215,7 @@ def main(args):
 
     if args.sig_format:
         # Save all parameters to HDF5 file for exact reproducibility with callpeak_sig
-        if args.sig_format == 'np_array':
+        if args.sig_format in ('np_array', 'memmap_np'):
             with h5py.File(treatment_np_tmp_name, mode='a', libver='latest') as sig_file:
                 # Core peak calling parameters
                 sig_file.attrs['threshold'] = threshold
@@ -238,9 +242,12 @@ def main(args):
                 else:
                     sig_file.attrs['has_control'] = False
 
+        # Pass memmap output directory if using memmap_np format
+        memmap_out_dir = memmap_output_dir if args.sig_format == 'memmap_np' else None
         fseq2.output_sig(sig_format=args.sig_format, treatment_np_tmp_name=treatment_np_tmp_name,
                    out_dir=args.o, out_name=args.name, chr_size_dic=chr_size_dic,
-                   sig_float_precision=sig_float_precision, gaussian_smooth_sigma=gaussian_smooth_sigma) #note if output np_array, then no gaussian smooth
+                   sig_float_precision=sig_float_precision, gaussian_smooth_sigma=gaussian_smooth_sigma,
+                   memmap_out_dir=memmap_out_dir)  # note if output np_array, then no gaussian smooth
 
     if args.v:
         print('#3: Done', flush=True)

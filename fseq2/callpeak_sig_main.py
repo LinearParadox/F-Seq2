@@ -3,10 +3,13 @@
 """F-Seq Version2 call peaks from signal file main script.
 
 This module provides functionality to call peaks directly from pre-computed
-HDF5 signal files (.h5 files) produced by the callpeak command with
--sig_format np_array option.
+signal files produced by the callpeak command with -sig_format np_array
+or -sig_format memmap_np options.
 """
 
+import json
+import multiprocessing as mp
+import os
 import time
 
 import h5py
@@ -31,50 +34,73 @@ def main(args):
 
     signal_file_path = args.signal_file
 
-    # Open and inspect HDF5 file
-    with h5py.File(signal_file_path, 'r') as sig_file:
-        chrom_ls = list(sig_file.keys())
+    # Detect input format: HDF5 file or memmap_np directory
+    is_memmap_dir = os.path.isdir(signal_file_path)
+
+    if is_memmap_dir:
+        # memmap_np directory format
+        metadata_path = os.path.join(signal_file_path, 'metadata.json')
+        if not os.path.exists(metadata_path):
+            raise ValueError(f"No metadata.json found in {signal_file_path}. "
+                           "Is this a valid memmap_np signal directory?")
+
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+
+        chrom_ls = list(metadata['chromosomes'].keys())
 
         if not chrom_ls:
             raise ValueError(f"No chromosome data found in {signal_file_path}")
 
-        if args.use_file_params:
-            # Read parameters from file (as computed by callpeak)
+        # Always read parameters from file
+        params = metadata.get('parameters', {})
+        if 'threshold' not in params:
+            raise ValueError(
+                "Signal directory does not contain callpeak parameters. "
+                "Regenerate with a recent version of fseq2 callpeak -sig_format memmap_np."
+            )
+        threshold = float(params['threshold'])
+        peak_region_threshold = float(params['peak_region_threshold'])
+        min_prominence = float(params['min_prominence'])
+        lambda_bg_lower_bound = float(params['lambda_bg_lower_bound'])
+        sparse_data = bool(params['sparse_data'])
+        # Allow command-line overrides for min_distance and window_size
+        min_distance = args.min_distance if args.min_distance is not None else int(params['min_distance'])
+        window_size = args.window_size if args.window_size is not None else int(params['window_size'])
+    else:
+        # HDF5 file format
+        with h5py.File(signal_file_path, 'r') as sig_file:
+            chrom_ls = list(sig_file.keys())
+
+            if not chrom_ls:
+                raise ValueError(f"No chromosome data found in {signal_file_path}")
+
+            # Always read parameters from file
             if 'threshold' not in sig_file.attrs:
                 raise ValueError(
                     "Signal file does not contain callpeak parameters. "
                     "Regenerate with a recent version of fseq2 callpeak -sig_format np_array."
                 )
-            # Core peak calling parameters
             threshold = float(sig_file.attrs['threshold'])
             peak_region_threshold = float(sig_file.attrs['peak_region_threshold'])
-            min_distance = int(sig_file.attrs['min_distance'])
             min_prominence = float(sig_file.attrs['min_prominence'])
-            window_size = int(sig_file.attrs['window_size'])
             lambda_bg_lower_bound = float(sig_file.attrs['lambda_bg_lower_bound'])
             sparse_data = bool(sig_file.attrs['sparse_data'])
-        else:
-            # Calculate thresholds from signal (original behavior)
-            threshold, peak_region_threshold = calculate_thresholds(
-                sig_file, chrom_ls, args
-            )
-            min_distance = args.min_distance
-            min_prominence = None  # Not available without file params
-            window_size = args.window_size
-            lambda_bg_lower_bound = 0  # Default when calling from signal without params
-            sparse_data = False
+            # Allow command-line overrides for min_distance and window_size
+            min_distance = args.min_distance if args.min_distance is not None else int(sig_file.attrs['min_distance'])
+            window_size = args.window_size if args.window_size is not None else int(sig_file.attrs['window_size'])
 
     if args.v:
-        print(f'\tSignal file: {signal_file_path}', flush=True)
+        format_type = "memmap_np directory" if is_memmap_dir else "HDF5 file"
+        print(f'\tSignal source: {signal_file_path} ({format_type})', flush=True)
         print(f'\tChromosomes found: {len(chrom_ls)}', flush=True)
         print(f'\tThreshold: {threshold:.3f}', flush=True)
         print(f'\tPeak region threshold: {peak_region_threshold:.3f}', flush=True)
         print(f'\tMin distance: {min_distance}', flush=True)
         print(f'\tWindow size: {window_size}', flush=True)
-        if args.use_file_params:
-            print(f'\tMin prominence: {min_prominence:.3f}', flush=True)
-            print(f'\tLambda bg lower bound: {lambda_bg_lower_bound:.3f}', flush=True)
-            print(f'\tSparse data: {sparse_data}', flush=True)
+        print(f'\tMin prominence: {min_prominence:.3f}', flush=True)
+        print(f'\tLambda bg lower bound: {lambda_bg_lower_bound:.3f}', flush=True)
+        print(f'\tSparse data: {sparse_data}', flush=True)
         print('#1: Done', flush=True)
         print('-------------------------------------', flush=True)
 
@@ -82,28 +108,58 @@ def main(args):
     if args.v:
         print('#2: Calling peaks from signal\n', flush=True)
 
-    results = []
-    with h5py.File(signal_file_path, 'r') as sig_file:
+    cpus = args.cpus
+    ctx = mp.get_context('spawn')
+
+    if is_memmap_dir:
+        # For memmap_np: pass file paths, workers will memory-map the files
+        chrom_data = []
         for chrom in chrom_ls:
-            signal_array = sig_file[chrom][:].astype(np.float32)
-            first_cut = int(sig_file.attrs[chrom])
+            chrom_info = metadata['chromosomes'][chrom]
+            npy_path = os.path.join(signal_file_path, chrom_info['file'])
+            first_cut = chrom_info['first_cut']
+            chrom_data.append((
+                chrom,
+                npy_path,  # Pass path instead of array
+                first_cut,
+                threshold,
+                peak_region_threshold,
+                min_distance,
+                min_prominence,
+                window_size,
+                lambda_bg_lower_bound,
+                sparse_data,
+                args.v
+            ))
 
-            result_df = process_chrom_from_signal(
-                chrom=chrom,
-                signal_array=signal_array,
-                first_cut=first_cut,
-                threshold=threshold,
-                peak_region_threshold=peak_region_threshold,
-                min_distance=min_distance,
-                min_prominence=min_prominence,
-                window_size=window_size,
-                lambda_bg_lower_bound=lambda_bg_lower_bound,
-                sparse_data=sparse_data,
-                verbose=args.v
-            )
+        with ctx.Pool(processes=cpus) as pool:
+            results = pool.starmap(process_chrom_from_memmap, chrom_data)
+    else:
+        # For HDF5: pre-load all data into memory (h5py files can't be pickled)
+        chrom_data = []
+        with h5py.File(signal_file_path, 'r') as sig_file:
+            for chrom in chrom_ls:
+                signal_array = sig_file[chrom][:].astype(np.float32)
+                first_cut = int(sig_file.attrs[chrom])
+                chrom_data.append((
+                    chrom,
+                    signal_array,
+                    first_cut,
+                    threshold,
+                    peak_region_threshold,
+                    min_distance,
+                    min_prominence,
+                    window_size,
+                    lambda_bg_lower_bound,
+                    sparse_data,
+                    args.v
+                ))
 
-            if result_df is not None and not result_df.empty:
-                results.append(result_df)
+        with ctx.Pool(processes=cpus) as pool:
+            results = pool.starmap(process_chrom_from_signal, chrom_data)
+
+    # Filter out empty results
+    results = [r for r in results if r is not None and not r.empty]
 
     if not results:
         print("Warning: No peaks found in any chromosome.", flush=True)
@@ -170,61 +226,6 @@ def main(args):
         print(f'Thanks for using F-seq{fseq2.__version__}!\n', flush=True)
 
     return
-
-
-def calculate_thresholds(sig_file, chrom_ls, args):
-    """Calculate or parse threshold values.
-
-    Args:
-        sig_file: Open h5py File object
-        chrom_ls: List of chromosome names
-        args: argparse.Namespace with threshold parameters
-
-    Returns:
-        tuple: (threshold, peak_region_threshold)
-    """
-    # Determine threshold
-    if args.t == 'auto':
-        # Sample signal to estimate threshold
-        all_signals = []
-        for chrom in chrom_ls[:min(5, len(chrom_ls))]:  # Sample up to first 5 chromosomes
-            sig = sig_file[chrom][:]
-            # Subsample for efficiency (every 100th position)
-            all_signals.append(sig[::100])
-
-        combined_signal = np.concatenate(all_signals)
-        # Use only non-zero positive values for estimation
-        combined_signal = combined_signal[combined_signal > 0]
-
-        if combined_signal.size == 0:
-            raise ValueError("Signal file contains no positive values - cannot estimate threshold")
-
-        mean_sig = np.mean(combined_signal)
-        std_sig = np.std(combined_signal)
-        threshold = mean_sig + args.t_std * std_sig
-    else:
-        threshold = float(args.t)
-
-    # Determine peak region threshold
-    if args.tp is None:
-        peak_region_threshold = threshold
-    elif args.tp == 'auto':
-        # Reuse or recalculate from signal
-        if 'combined_signal' not in dir():
-            all_signals = []
-            for chrom in chrom_ls[:min(5, len(chrom_ls))]:
-                sig = sig_file[chrom][:]
-                all_signals.append(sig[::100])
-            combined_signal = np.concatenate(all_signals)
-            combined_signal = combined_signal[combined_signal > 0]
-
-        mean_sig = np.mean(combined_signal)
-        std_sig = np.std(combined_signal)
-        peak_region_threshold = mean_sig + args.tp_std * std_sig
-    else:
-        peak_region_threshold = float(args.tp)
-
-    return threshold, peak_region_threshold
 
 
 def process_chrom_from_signal(chrom, signal_array, first_cut, threshold,
@@ -314,3 +315,47 @@ def process_chrom_from_signal(chrom, signal_array, first_cut, threshold,
               flush=True)
 
     return result_df
+
+
+def process_chrom_from_memmap(chrom, npy_path, first_cut, threshold,
+                               peak_region_threshold, min_distance, min_prominence,
+                               window_size, lambda_bg_lower_bound, sparse_data,
+                               verbose=False):
+    """Process a single chromosome from memory-mapped .npy file.
+
+    This function loads the signal array using memory-mapping, which allows
+    multiple processes to share the same memory without copying.
+
+    Args:
+        chrom: Chromosome name
+        npy_path: Path to the .npy file containing signal data
+        first_cut: Starting genomic position
+        threshold: Minimum peak height threshold
+        peak_region_threshold: Threshold for contiguous peak regions
+        min_distance: Minimum distance between peaks
+        min_prominence: Minimum prominence for peaks (from original callpeak)
+        window_size: Window size for lambda calculation
+        lambda_bg_lower_bound: Lower bound for background lambda
+        sparse_data: Whether to use sparse data mode for local lambda calculation
+        verbose: Whether to print progress
+
+    Returns:
+        pd.DataFrame with peak data or empty DataFrame if no peaks found
+    """
+    # Load signal array with memory mapping (read-only, shared across processes)
+    signal_array = np.load(npy_path, mmap_mode='r')
+
+    # Delegate to the main processing function
+    return process_chrom_from_signal(
+        chrom=chrom,
+        signal_array=signal_array,
+        first_cut=first_cut,
+        threshold=threshold,
+        peak_region_threshold=peak_region_threshold,
+        min_distance=min_distance,
+        min_prominence=min_prominence,
+        window_size=window_size,
+        lambda_bg_lower_bound=lambda_bg_lower_bound,
+        sparse_data=sparse_data,
+        verbose=verbose
+    )
