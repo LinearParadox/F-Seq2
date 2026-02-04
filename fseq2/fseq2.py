@@ -250,20 +250,18 @@ def run_kde(cuts_array, start_array, end_array, strand_array,
             with h5py.File(params.treatment_np_tmp_name, mode='a', libver='latest') as sig_file:
                 try:
                     sig_file.create_dataset(chrom,
-                                            data=np.round(np.divide(kdepy_result,
+                                            data=np.divide(kdepy_result,
                                                            kdepy_result_control, out=np.zeros_like(kdepy_result),
-                                                           where=kdepy_result_control>lambda_bg_lower_bound_ind),
-                                                          params.sig_float_precision).astype(np.float16),
-                                            dtype='f2')#, compression='gzip')
+                                                           where=kdepy_result_control>lambda_bg_lower_bound_ind).astype(np.float32),
+                                            dtype='f4')#, compression='gzip')
                     sig_file.attrs[chrom] = first_cut
                 except RuntimeError:
                     del sig_file[chrom]
                     sig_file.create_dataset(chrom,
-                                            data=np.round(np.divide(kdepy_result,
+                                            data=np.divide(kdepy_result,
                                                            kdepy_result_control, out=np.zeros_like(kdepy_result),
-                                                           where=kdepy_result_control>lambda_bg_lower_bound_ind),
-                                                          params.sig_float_precision).astype(np.float16),
-                                            dtype='f2')#, compression='gzip')
+                                                           where=kdepy_result_control>lambda_bg_lower_bound_ind).astype(np.float32),
+                                            dtype='f4')#, compression='gzip')
                     sig_file.attrs[chrom] = first_cut
 
         # 2. calculate lambda_bg which needs all control signal in memory
@@ -377,14 +375,14 @@ def run_kde_wo_control(cuts_array, start_array, end_array, strand_array, chrom, 
             with h5py.File(params.treatment_np_tmp_name, mode='a', libver='latest') as sig_file:
                 try:
                     sig_file.create_dataset(chrom,
-                                            data=np.round(kdepy_result, params.sig_float_precision).astype(np.float16),
-                                            dtype='f2')#, compression='gzip')
+                                            data=kdepy_result,
+                                            dtype='f4')#, compression='gzip')
                     sig_file.attrs[chrom] = first_cut
                 except RuntimeError:
                     del sig_file[chrom]
                     sig_file.create_dataset(chrom,
-                                            data=np.round(kdepy_result, params.sig_float_precision).astype(np.float16),
-                                            dtype='f2')#, compression='gzip')
+                                            data=kdepy_result,
+                                            dtype='f4')#, compression='gzip')
                     sig_file.attrs[chrom] = first_cut
 
 
@@ -1021,9 +1019,9 @@ def output_sig(sig_format, treatment_np_tmp_name, out_dir, out_name, chr_size_di
                                              step=1)
                 else:
                     for chrom_line in chrom_line_ls:
-                        #kdepy_result = sig_file[chrom_line][:].astype(np.float64)
-                        kdepy_result = np.round(sig_file[chrom_line][:], sig_float_precision).astype(np.float16)
-                        #kdepy_result[kdepy_result == 0] = np.NaN
+                        kdepy_result = sig_file[chrom_line][:].astype(np.float64)
+                        #kdepy_result = np.round(sig_file[chrom_line][:], sig_float_precision).astype(np.float16)
+                        kdepy_result[kdepy_result == 0] = np.NaN
                         output_bw.addEntries(chrom_line, int(sig_file.attrs[chrom_line]), values=kdepy_result, span=1,
                                              step=1)
 

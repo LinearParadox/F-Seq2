@@ -6,6 +6,7 @@
 import multiprocessing as mp
 import sys
 
+import h5py
 from numpy import ptp
 from pandas import concat, DataFrame
 
@@ -25,6 +26,7 @@ def main(args):
         chrom_ls_to_process = list(chr_size_dic)
     else:
         chrom_ls_to_process = False
+        chr_size_dic = {}
         if (args.sig_format == 'bigwig'):
             sys.exit('Error: please specify chrom_size_file to output bigwig signal.')
 
@@ -208,6 +210,34 @@ def main(args):
                             standard_narrowpeak=args.standard_narrowpeak)
 
     if args.sig_format:
+        # Save all parameters to HDF5 file for exact reproducibility with callpeak_sig
+        if args.sig_format == 'np_array':
+            with h5py.File(treatment_np_tmp_name, mode='a', libver='latest') as sig_file:
+                # Core peak calling parameters
+                sig_file.attrs['threshold'] = threshold
+                sig_file.attrs['peak_region_threshold'] = peak_region_threshold
+                sig_file.attrs['min_distance'] = min_distance
+                sig_file.attrs['min_prominence'] = min_prominence
+                sig_file.attrs['window_size'] = window_size
+                sig_file.attrs['lambda_bg_lower_bound'] = lambda_bg_lower_bound
+                # KDE parameters
+                sig_file.attrs['bandwidth'] = bandwidth
+                sig_file.attrs['fragment_offset'] = fragment_offset
+                sig_file.attrs['scaling_factor'] = scaling_factor
+                sig_file.attrs['fragment_size'] = fragment_size
+                sig_file.attrs['feature_length'] = feature_length
+                # Data parameters
+                sig_file.attrs['ncuts'] = ncuts
+                sig_file.attrs['sparse_data'] = args.sparse_data
+                # Control-related parameters (if applicable)
+                if args.control_file:
+                    sig_file.attrs['has_control'] = True
+                    sig_file.attrs['bandwidth_control'] = bandwidth_control
+                    sig_file.attrs['fragment_offset_control'] = fragment_offset_control
+                    sig_file.attrs['ncuts_control'] = ncuts_control
+                else:
+                    sig_file.attrs['has_control'] = False
+
         fseq2.output_sig(sig_format=args.sig_format, treatment_np_tmp_name=treatment_np_tmp_name,
                    out_dir=args.o, out_name=args.name, chr_size_dic=chr_size_dic,
                    sig_float_precision=sig_float_precision, gaussian_smooth_sigma=gaussian_smooth_sigma) #note if output np_array, then no gaussian smooth
